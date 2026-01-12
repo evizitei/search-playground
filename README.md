@@ -46,3 +46,22 @@ Main entry points:
 - `mcts_search()` in `mcts_map_coloring.py`
 - `uct_select_child()` in `mcts_map_coloring.py`
 - `rollout()` in `mcts_map_coloring.py`
+
+## Connect-K AlphaZero-lite (neural-guided MCTS)
+
+`connectk_azlite.py` is a dependency-free, educational implementation of:
+- a tiny policy+value network (manual backprop + Adam)
+- PUCT MCTS guided by that network
+- a minimal self-play training loop that learns from `(π, z)` targets (visit-count policy + final outcome)
+
+Train (small and fast-ish defaults):
+
+```bash
+python3 connectk_azlite.py train --width 5 --height 4 --k 4 --iters 5 --games-per-iter 5 --sims 50
+```
+
+Play against the latest saved model:
+
+```bash
+python3 connectk_azlite.py play --width 5 --height 4 --k 4 --model connectk_model.json --no-dirichlet
+```

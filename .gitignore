@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Training artifacts
+*.pt
+*.pth
+connectk_model*.json
+connectk_model*.pt
+
