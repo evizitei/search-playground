@@ -13,6 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+import abc
+import argparse
+import random
+
 import numpy as np
 
 
@@ -173,7 +177,45 @@ def _parse_column(raw: str, width: int) -> Optional[int]:
     return None
 
 
-def play_cli(cfg: Connect4Config) -> None:
+class Agent(abc.ABC):
+    name: str
+
+    @abc.abstractmethod
+    def select_move(self, cfg: Connect4Config, s: GameState) -> int:
+        raise NotImplementedError
+
+
+class HumanAgent(Agent):
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def select_move(self, cfg: Connect4Config, s: GameState) -> int:
+        legal = legal_moves(cfg, s).tolist()
+        prompt = f"{self.name} ({'X' if s.current_player == 1 else 'O'}) to move. Column {legal}: "
+
+        while True:
+            raw = input(prompt)
+            col = _parse_column(raw, cfg.width)
+            if col is None:
+                print("Enter a column index (0-based or 1-based).")
+                continue
+            if col not in legal:
+                print("Illegal move: column full or out of range.")
+                continue
+            return col
+
+
+class RandomAgent(Agent):
+    def __init__(self, name: str, seed: Optional[int] = None) -> None:
+        self.name = name
+        self.rng = random.Random(seed)
+
+    def select_move(self, cfg: Connect4Config, s: GameState) -> int:
+        legal = legal_moves(cfg, s).tolist()
+        return self.rng.choice(legal)
+
+
+def play_game(cfg: Connect4Config, x_agent: Agent, o_agent: Agent) -> None:
     s = initial_state(cfg)
 
     while True:
@@ -189,20 +231,8 @@ def play_cli(cfg: Connect4Config) -> None:
                 print(f"Moves: {format_move_history(s.move_history)}")
             return
 
-        player = "X" if s.current_player == 1 else "O"
-        legal = legal_moves(cfg, s).tolist()
-        prompt = f"Player {player} to move. Column {legal}: "
-
-        while True:
-            raw = input(prompt)
-            col = _parse_column(raw, cfg.width)
-            if col is None:
-                print("Enter a column index (0-based or 1-based).")
-                continue
-            if col not in legal:
-                print("Illegal move: column full or out of range.")
-                continue
-            break
+        agent = x_agent if s.current_player == 1 else o_agent
+        col = agent.select_move(cfg, s)
 
         s = apply_move(cfg, s, col)
         move = s.move_history[-1]
@@ -211,8 +241,36 @@ def play_cli(cfg: Connect4Config) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Connect-4 (6x6) CLI")
+    parser.add_argument("--x", choices=["human", "random"], default="human", help="agent for X")
+    parser.add_argument("--o", choices=["human", "random"], default="human", help="agent for O")
+    parser.add_argument("--seed", type=int, default=None, help="base random seed (for random agents)")
+    parser.add_argument("--seed-x", type=int, default=None, help="seed for X random agent")
+    parser.add_argument("--seed-o", type=int, default=None, help="seed for O random agent")
+    args = parser.parse_args()
+
     cfg = Connect4Config()
-    play_cli(cfg)
+
+    x_agent: Agent
+    o_agent: Agent
+    if args.x == "human":
+        x_agent = HumanAgent("Player X")
+    else:
+        seed_x = args.seed_x if args.seed_x is not None else args.seed
+        x_agent = RandomAgent("Random X", seed=seed_x)
+
+    if args.o == "human":
+        o_agent = HumanAgent("Player O")
+    else:
+        if args.seed_o is not None:
+            seed_o = args.seed_o
+        elif args.seed is not None:
+            seed_o = args.seed + 1
+        else:
+            seed_o = None
+        o_agent = RandomAgent("Random O", seed=seed_o)
+
+    play_game(cfg, x_agent, o_agent)
 
 
 if __name__ == "__main__":
