@@ -83,7 +83,8 @@ uv run python connectk_azlite.py play --width 5 --height 4 --k 4 --model-path co
 ## Connect‑4 (6x6) CLI + agents
 
 The classic gravity‑bound Connect‑4 on a 6x6 board, with pluggable agents:
-`human`, `random`, and `alphabeta` (minimax with alpha‑beta pruning).
+`human`, `random`, `alphabeta` (minimax with alpha‑beta pruning), and `alphazero`
+(policy/value network + PUCT MCTS).
 
 Run (human vs alpha‑beta):
 
@@ -104,7 +105,41 @@ uv run python connect4_cli.py --x alphabeta --o alphabeta --ab-depth-x 4 --ab-de
 ```
 
 Agent flags:
-- `--x` / `--o`: `human | random | alphabeta`
+- `--x` / `--o`: `human | random | alphabeta | alphazero`
 - `--seed`, `--seed-x`, `--seed-o`: RNG control for random agents
 - `--ab-depth`, `--ab-depth-x`, `--ab-depth-o`: depth in plies
 - `--ab-nodes`, `--ab-nodes-x`, `--ab-nodes-o`: node budget limit
+- `--az-model`, `--az-model-x`, `--az-model-o`: AlphaZero model path(s)
+- `--az-sims`, `--az-cpuct`: AlphaZero MCTS parameters
+
+## Connect‑4 AlphaZero-style self-play training
+
+Train a policy/value network via self-play with PUCT MCTS. Checkpoints are saved
+every N self-play games so you can load different training stages later.
+
+Example (small, fast-ish defaults):
+
+```bash
+uv run python connect4_az_train.py --iters 5 --games-per-iter 5 --sims 100 --checkpoint-every-games 10
+```
+
+Useful knobs:
+- `--sims`: MCTS simulations per move
+- `--cpuct`: exploration constant in PUCT
+- `--dirichlet-alpha`, `--dirichlet-eps`: exploration noise at root
+- `--temp-moves`: plies using temperature=1 before switching to greedy
+- `--replay-size`: replay buffer size
+- `--train-steps`: gradient steps per iteration
+- `--batch-size`: training batch size
+- `--checkpoint-every-games`: save model every N self-play games
+
+Play against a trained model:
+
+```bash
+uv run python connect4_cli.py --x human --o alphazero --az-model connect4_az_models/connect4_az_latest.pt
+```
+
+Quick diagnostics to sanity-check training:
+- Run a tiny loop (`--iters 1 --games-per-iter 1 --sims 10`) and verify the run completes.
+- Check that policies sum to 1 for legal moves by printing `pi.sum()` in `connect4/az/train.py`.
+- Confirm the CLI can load a checkpoint and play a full game without errors.

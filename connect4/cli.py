@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import List, Optional, Sequence
 
-from connect4.agents import Agent, AlphaBetaAgent, HumanAgent, RandomAgent
+from connect4.agents import Agent, AlphaBetaAgent, AlphaZeroAgent, HumanAgent, RandomAgent
 from connect4.engine import Connect4Config, GameState, Move, apply_move, initial_state, legal_moves, terminal_result
 
 
@@ -94,8 +95,18 @@ def _pick_seed(base: Optional[int], override: Optional[int], *, offset: int = 0)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Connect-4 (6x6) CLI")
-    parser.add_argument("--x", choices=["human", "random", "alphabeta"], default="human", help="agent for X")
-    parser.add_argument("--o", choices=["human", "random", "alphabeta"], default="human", help="agent for O")
+    parser.add_argument(
+        "--x",
+        choices=["human", "random", "alphabeta", "alphazero"],
+        default="human",
+        help="agent for X",
+    )
+    parser.add_argument(
+        "--o",
+        choices=["human", "random", "alphabeta", "alphazero"],
+        default="human",
+        help="agent for O",
+    )
 
     parser.add_argument("--seed", type=int, default=None, help="base random seed (for random agents)")
     parser.add_argument("--seed-x", type=int, default=None, help="seed for X random agent")
@@ -109,6 +120,17 @@ def main() -> None:
     parser.add_argument("--ab-nodes-x", type=int, default=None, help="alpha-beta node budget for X")
     parser.add_argument("--ab-nodes-o", type=int, default=None, help="alpha-beta node budget for O")
 
+    parser.add_argument("--az-model", type=Path, default=None, help="path to AlphaZero model")
+    parser.add_argument("--az-model-x", type=Path, default=None, help="AlphaZero model path for X")
+    parser.add_argument("--az-model-o", type=Path, default=None, help="AlphaZero model path for O")
+    parser.add_argument("--az-sims", type=int, default=400, help="AlphaZero MCTS sims per move")
+    parser.add_argument("--az-sims-x", type=int, default=None, help="AlphaZero sims for X")
+    parser.add_argument("--az-sims-o", type=int, default=None, help="AlphaZero sims for O")
+    parser.add_argument("--az-cpuct", type=float, default=1.5, help="AlphaZero cpuct")
+    parser.add_argument("--az-cpuct-x", type=float, default=None, help="AlphaZero cpuct for X")
+    parser.add_argument("--az-cpuct-o", type=float, default=None, help="AlphaZero cpuct for O")
+    parser.add_argument("--az-device", type=str, default="auto", help="cpu, cuda, or auto")
+
     args = parser.parse_args()
 
     cfg = Connect4Config()
@@ -119,12 +141,18 @@ def main() -> None:
             depth = args.ab_depth_x if args.ab_depth_x is not None else args.ab_depth
             nodes = args.ab_nodes_x if args.ab_nodes_x is not None else args.ab_nodes
             seed = _pick_seed(args.seed, args.seed_x, offset=0)
+            az_model = args.az_model_x if args.az_model_x is not None else args.az_model
+            az_sims = args.az_sims_x if args.az_sims_x is not None else args.az_sims
+            az_cpuct = args.az_cpuct_x if args.az_cpuct_x is not None else args.az_cpuct
             name = "Player X"
         else:
             choice = args.o
             depth = args.ab_depth_o if args.ab_depth_o is not None else args.ab_depth
             nodes = args.ab_nodes_o if args.ab_nodes_o is not None else args.ab_nodes
             seed = _pick_seed(args.seed, args.seed_o, offset=1)
+            az_model = args.az_model_o if args.az_model_o is not None else args.az_model
+            az_sims = args.az_sims_o if args.az_sims_o is not None else args.az_sims
+            az_cpuct = args.az_cpuct_o if args.az_cpuct_o is not None else args.az_cpuct
             name = "Player O"
 
         if choice == "human":
@@ -133,6 +161,16 @@ def main() -> None:
             return RandomAgent(f"Random {name[-1]}", seed=seed)
         if choice == "alphabeta":
             return AlphaBetaAgent(f"AlphaBeta {name[-1]}", max_depth=depth, max_nodes=nodes)
+        if choice == "alphazero":
+            if az_model is None:
+                raise ValueError("alphazero agent requires --az-model (or --az-model-x/--az-model-o)")
+            return AlphaZeroAgent(
+                f"AlphaZero {name[-1]}",
+                model_path=az_model,
+                sims=az_sims,
+                c_puct=az_cpuct,
+                device=args.az_device,
+            )
 
         raise ValueError(f"unsupported agent choice: {choice}")
 
