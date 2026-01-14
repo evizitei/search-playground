@@ -35,7 +35,6 @@ class Connect4Config:
 class Move:
     ply: int
     player: int  # +1 or -1
-    row: int
     col: int
 
 
@@ -88,7 +87,7 @@ def apply_move(cfg: Connect4Config, s: GameState, col: int) -> GameState:
     heights = s.heights.copy()
     heights[col] += 1
 
-    move = Move(ply=s.ply, player=s.current_player, row=row, col=col)
+    move = Move(ply=s.ply, player=s.current_player, col=col)
     history = s.move_history + (move,)
 
     return GameState(
@@ -154,7 +153,7 @@ def format_move_history(moves: Sequence[Move]) -> str:
     parts = []
     for m in moves:
         player = "X" if m.player == 1 else "O"
-        parts.append(f"{m.ply}:{player}@({m.row},{m.col})")
+        parts.append(f"{m.ply}:{player}@{m.col}")
     return " ".join(parts)
 
 
@@ -207,7 +206,7 @@ def play_cli(cfg: Connect4Config) -> None:
 
         s = apply_move(cfg, s, col)
         move = s.move_history[-1]
-        print(f"Move: {'X' if move.player == 1 else 'O'} -> col {move.col}, row {move.row}")
+        print(f"Move: {'X' if move.player == 1 else 'O'} -> col {move.col}, row {s.last_row}")
         print("")
 
 
