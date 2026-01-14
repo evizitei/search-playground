@@ -79,3 +79,32 @@ Play against the latest saved model:
 ```bash
 uv run python connectk_azlite.py play --width 5 --height 4 --k 4 --model-path connectk_model.pt
 ```
+
+## Connect‑4 (6x6) CLI + agents
+
+The classic gravity‑bound Connect‑4 on a 6x6 board, with pluggable agents:
+`human`, `random`, and `alphabeta` (minimax with alpha‑beta pruning).
+
+Run (human vs alpha‑beta):
+
+```bash
+uv run python connect4_cli.py --x human --o alphabeta --ab-depth 5
+```
+
+Random vs random (different seeds by default):
+
+```bash
+uv run python connect4_cli.py --x random --o random --seed 42
+```
+
+Alpha‑beta vs alpha‑beta with different budgets:
+
+```bash
+uv run python connect4_cli.py --x alphabeta --o alphabeta --ab-depth-x 4 --ab-depth-o 6 --ab-nodes 2000
+```
+
+Agent flags:
+- `--x` / `--o`: `human | random | alphabeta`
+- `--seed`, `--seed-x`, `--seed-o`: RNG control for random agents
+- `--ab-depth`, `--ab-depth-x`, `--ab-depth-o`: depth in plies
+- `--ab-nodes`, `--ab-nodes-x`, `--ab-nodes-o`: node budget limit
