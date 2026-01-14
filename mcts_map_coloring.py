@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import random
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import typer
+from rich.console import Console
+
+
+app = typer.Typer(no_args_is_help=True)
+console = Console()
 
 
 Color = int  # 0..3
@@ -261,7 +267,7 @@ def mcts_search(
 
         if verbose_every and (it % verbose_every == 0 or reward == 1.0):
             elapsed = time.time() - start
-            print(
+            console.print(
                 f"iter={it} best={best_reward:.3f} root_q={root.q():.3f} "
                 f"root_children={len(root.children)} elapsed={elapsed:.2f}s"
             )
@@ -311,7 +317,7 @@ def print_principal_variation(root: Node, *, order: Sequence[Vertex], n: int, ma
         child = max(node.children.values(), key=lambda ch: ch.visits)
         v = order[depth]
         color = child.action_from_parent
-        print(
+        console.print(
             f"pv depth={depth:02d} v={format_vertex(v, n)} color={color} "
             f"visits={child.visits} q={child.q():.3f}"
         )
@@ -321,118 +327,90 @@ def print_principal_variation(root: Node, *, order: Sequence[Vertex], n: int, ma
 
 def print_root_children(root: Node) -> None:
     if not root.children:
-        print("root has no children (no legal moves at depth 0)")
+        console.print("root has no children (no legal moves at depth 0)")
         return
     items = sorted(root.children.items(), key=lambda kv: kv[1].visits, reverse=True)
-    print("root children (color -> visits, q):")
+    console.print("root children (color -> visits, q):")
     for color, child in items:
-        print(f"  {color} -> {child.visits}, {child.q():.3f}")
+        console.print(f"  {color} -> {child.visits}, {child.q():.3f}")
 
-
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Vanilla MCTS/UCT for 4-coloring a planar grid graph.")
-    p.add_argument("--size", type=int, default=6, help="Grid size N (graph has N*N vertices).")
-    p.add_argument("--seed", type=int, default=0, help="Random seed (graph + MCTS).")
-    p.add_argument("--iterations", type=int, default=50_000, help="Max MCTS iterations.")
-    p.add_argument("--c", type=float, default=1.4, help="UCT exploration constant.")
-    p.add_argument("--colors", type=int, default=4, help="Number of available colors.")
-    p.add_argument(
-        "--order",
-        choices=["degree", "natural"],
-        default="degree",
-        help="Vertex ordering for sequential coloring.",
-    )
-    p.add_argument(
-        "--rollout",
-        choices=["random", "greedy"],
-        default="random",
-        help="Rollout policy used during simulation.",
-    )
-    p.add_argument(
-        "--verbose-every",
-        type=int,
-        default=1_000,
-        help="Print progress every N iterations (0 disables).",
-    )
-    p.add_argument(
+@app.command()
+def solve(
+    size: int = typer.Option(6, help="Grid size N (graph has N*N vertices)."),
+    seed: int = typer.Option(0, help="Random seed (graph + MCTS)."),
+    iterations: int = typer.Option(50_000, help="Max MCTS iterations."),
+    c: float = typer.Option(1.4, help="UCT exploration constant."),
+    colors: int = typer.Option(4, help="Number of available colors."),
+    order: str = typer.Option("degree", help="Vertex ordering: degree|natural."),
+    rollout: str = typer.Option("random", help="Rollout policy: random|greedy."),
+    verbose_every: int = typer.Option(1_000, help="Print progress every N iterations (0 disables)."),
+    continue_after_solve: bool = typer.Option(
+        False,
         "--continue-after-solve",
-        action="store_true",
         help="Keep searching even after a valid coloring is found (useful for inspection).",
-    )
-    p.add_argument(
-        "--inspect-root",
-        action="store_true",
-        help="Print root child stats after the search.",
-    )
-    p.add_argument(
-        "--inspect-pv",
-        type=int,
-        default=0,
-        metavar="DEPTH",
-        help="Print the principal variation (most-visited path) up to DEPTH steps.",
-    )
-    p.add_argument(
-        "--print-assignment",
-        choices=["list", "json"],
-        default=None,
-        help="Print the found vertex->color assignment (in addition to the grid, if enabled).",
-    )
-    p.add_argument("--no-render", action="store_true", help="Do not print the final grid coloring.")
-    return p.parse_args(argv)
+        is_flag=True,
+    ),
+    inspect_root: bool = typer.Option(
+        False, "--inspect-root", help="Print root child stats after the search.", is_flag=True
+    ),
+    inspect_pv: int = typer.Option(0, help="Print the principal variation up to DEPTH steps."),
+    print_assignment: Optional[str] = typer.Option(
+        None, help="Print vertex->color assignment: list|json (in addition to the grid, if enabled)."
+    ),
+    no_render: bool = typer.Option(False, "--no-render", help="Do not print the final grid coloring.", is_flag=True),
+) -> None:
+    if order not in {"degree", "natural"}:
+        raise typer.BadParameter("order must be 'degree' or 'natural'")
+    if rollout not in {"random", "greedy"}:
+        raise typer.BadParameter("rollout must be 'random' or 'greedy'")
+    if print_assignment not in {None, "list", "json"}:
+        raise typer.BadParameter("print-assignment must be 'list' or 'json'")
 
+    adj = build_planar_grid_graph(size, seed=seed)
+    vertex_order = order_vertices_by_degree(adj) if order == "degree" else list(range(len(adj)))
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_args(argv)
-    adj = build_planar_grid_graph(args.size, seed=args.seed)
-
-    if args.order == "degree":
-        order = order_vertices_by_degree(adj)
-    else:
-        order = list(range(len(adj)))
-
-    best_reward, best_prefix, _root = mcts_search(
+    best_reward, best_prefix, root = mcts_search(
         adj=adj,
-        n_colors=args.colors,
-        iterations=args.iterations,
-        exploration_c=args.c,
-        seed=args.seed,
-        rollout_policy=args.rollout,
-        order=order,
-        verbose_every=args.verbose_every,
-        continue_after_solve=args.continue_after_solve,
+        n_colors=colors,
+        iterations=iterations,
+        exploration_c=c,
+        seed=seed,
+        rollout_policy=rollout,
+        order=vertex_order,
+        verbose_every=verbose_every,
+        continue_after_solve=continue_after_solve,
     )
 
-    vcount = args.size * args.size
-    if args.inspect_root:
-        print_root_children(_root)
-    if args.inspect_pv:
-        print_principal_variation(_root, order=order, n=args.size, max_depth=args.inspect_pv)
+    vcount = size * size
+    if inspect_root:
+        print_root_children(root)
+    if inspect_pv:
+        print_principal_variation(root, order=vertex_order, n=size, max_depth=inspect_pv)
 
     if best_reward == 1.0:
-        colors = prefix_to_assignment(best_prefix, order, vcount)
-        verify_coloring(adj, colors, args.colors)
-        print(f"success: 4-coloring found for {args.size}x{args.size} in <= {args.iterations} iterations")
-        if args.print_assignment == "list":
-            for v, c in enumerate(colors):
-                print(f"v={format_vertex(v, args.size)} color={c}")
-        elif args.print_assignment == "json":
-            payload = {
-                "size": args.size,
-                "colors": args.colors,
-                "seed": args.seed,
-                "assignment": {str(v): int(c) for v, c in enumerate(colors)},
-            }
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        if not args.no_render:
-            print(render_grid(colors, args.size))
-        return 0
+        assignment = prefix_to_assignment(best_prefix, vertex_order, vcount)
+        verify_coloring(adj, assignment, colors)
+        console.print(f"success: {colors}-coloring found for {size}x{size} in <= {iterations} iterations")
+        if print_assignment == "list":
+            for v, col in enumerate(assignment):
+                console.print(f"v={format_vertex(v, size)} color={col}")
+        elif print_assignment == "json":
+            payload = {"size": size, "colors": colors, "seed": seed, "assignment": {str(v): int(col) for v, col in enumerate(assignment)}}
+            console.print(json.dumps(payload, indent=2, sort_keys=True))
+        if not no_render:
+            console.print(render_grid(assignment, size))
+        return
 
-    print(
+    console.print(
         f"failed: best partial coloring reached {best_reward:.3f} of vertices "
         f"({int(best_reward * vcount)}/{vcount})"
     )
-    return 2
+    raise typer.Exit(code=2)
+
+
+def main() -> None:
+    app()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

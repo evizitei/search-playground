@@ -1,25 +1,39 @@
-# MCTS / UCT playground: 4-coloring a planar graph
+# Search playgrounds: MCTS + neural-guided MCTS
 
-This repo contains a small, dependency-free implementation of Monte Carlo Tree Search (MCTS) with the UCT selection rule, applied to a simple constraint problem: **4-coloring a planar graph**.
+This repo contains small, educational implementations of:
+- Monte Carlo Tree Search (MCTS) with UCT on a constraint problem (map coloring)
+- Neural-guided MCTS (AlphaZero-lite: policy+value net + PUCT) on Connect‑K
 
-The “map” is a planar graph generated from an `N x N` grid with one random diagonal per cell (a planar triangulation-ish graph). The solver tries to assign one of 4 colors to each vertex so that adjacent vertices never share a color.
+## Setup (pyenv + uv)
 
-## Run
+This repo pins a stable Python via `pyenv` and uses `uv` for dependency management.
 
 ```bash
-python3 mcts_map_coloring.py --size 8 --seed 0 --iterations 50000 --rollout random
+pyenv install -s 3.12.12
+pyenv local 3.12.12
+uv sync
+```
+
+## Map coloring (MCTS / UCT)
+
+The “map” is a planar graph generated from an `N x N` grid with one random diagonal per cell (a planar triangulation-ish graph). The solver tries to assign colors so that adjacent vertices never share a color.
+
+Run:
+
+```bash
+uv run python mcts_map_coloring.py --size 8 --seed 0 --iterations 50000 --rollout random
 ```
 
 To make the search meaningfully harder (and watch MCTS struggle), try fewer colors:
 
 ```bash
-python3 mcts_map_coloring.py --size 8 --seed 0 --colors 3 --iterations 200000 --inspect-root --inspect-pv 10 --no-render
+uv run python mcts_map_coloring.py --size 8 --seed 0 --colors 3 --iterations 200000 --inspect-root --inspect-pv 10 --no-render
 ```
 
 More options:
 
 ```bash
-python3 mcts_map_coloring.py --help
+uv run python mcts_map_coloring.py --help
 ```
 
 Useful tweaks:
@@ -47,21 +61,21 @@ Main entry points:
 - `uct_select_child()` in `mcts_map_coloring.py`
 - `rollout()` in `mcts_map_coloring.py`
 
-## Connect-K AlphaZero-lite (neural-guided MCTS)
+## Connect‑K AlphaZero‑lite (neural-guided MCTS)
 
-`connectk_azlite.py` is a dependency-free, educational implementation of:
-- a tiny policy+value network (manual backprop + Adam)
+`connectk_azlite.py` is an educational implementation of:
+- a policy+value network in PyTorch
 - PUCT MCTS guided by that network
 - a minimal self-play training loop that learns from `(π, z)` targets (visit-count policy + final outcome)
 
 Train (small and fast-ish defaults):
 
 ```bash
-python3 connectk_azlite.py train --width 5 --height 4 --k 4 --iters 5 --games-per-iter 5 --sims 50
+uv run python connectk_azlite.py train --width 5 --height 4 --k 4 --iters 5 --games-per-iter 5 --sims 50
 ```
 
 Play against the latest saved model:
 
 ```bash
-python3 connectk_azlite.py play --width 5 --height 4 --k 4 --model connectk_model.json --no-dirichlet
+uv run python connectk_azlite.py play --width 5 --height 4 --k 4 --model-path connectk_model.pt
 ```
