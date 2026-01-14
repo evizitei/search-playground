@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Connect-4 on a 5x5 grid with gravity, plus a simple CLI for 2 humans.
+Connect-4 on a 6x6 grid with gravity, plus a simple CLI for 2 humans.
 
 Designed to be MCTS-friendly:
 - explicit GameState dataclass
@@ -18,8 +18,8 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Connect4Config:
-    width: int = 5
-    height: int = 5
+    width: int = 6
+    height: int = 6
     k: int = 4
 
     def validate(self) -> None:
