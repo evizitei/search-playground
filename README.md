@@ -132,6 +132,9 @@ Useful knobs:
 - `--train-steps`: gradient steps per iteration
 - `--batch-size`: training batch size
 - `--checkpoint-every-games`: save model every N self-play games
+- `--eval-games`: evaluation games per iter vs low-budget alpha-beta
+- `--eval-ab-depth`, `--eval-ab-nodes`: alpha-beta strength for evaluation
+- `--eval-sims`: MCTS sims per move for the eval agent
 
 Play against a trained model:
 

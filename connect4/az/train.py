@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -13,9 +13,17 @@ import torch.nn.functional as F
 from tqdm import trange
 
 from connect4.az.game import apply_move, initial_state, legal_moves, terminal_value
+from connect4.az.bridge import to_canonical_state
 from connect4.az.mcts import PUCTMCTS
 from connect4.az.model import ModelConfig, PolicyValueNet, pick_device, save_model
-from connect4.engine import Connect4Config
+from connect4.agents.alphabeta import AlphaBetaAgent
+from connect4.engine import (
+    Connect4Config,
+    GameState,
+    apply_move as engine_apply_move,
+    initial_state as engine_initial_state,
+    terminal_result,
+)
 
 
 @dataclass
@@ -114,6 +122,97 @@ def _prepare_batch(cfg: Connect4Config, batch: List[Example]) -> Tuple[torch.Ten
     return torch.from_numpy(x), torch.from_numpy(pi), torch.from_numpy(z)
 
 
+def _az_select_move(
+    *,
+    cfg: Connect4Config,
+    model: PolicyValueNet,
+    device: torch.device,
+    s: GameState,
+    sims: int,
+    c_puct: float,
+    seed: int,
+) -> int:
+    # Convert engine state to canonical form for MCTS.
+    canonical = to_canonical_state(s)
+    mcts = PUCTMCTS(
+        cfg=cfg,
+        model=model,
+        device=device,
+        sims=sims,
+        c_puct=c_puct,
+        dirichlet_alpha=0.3,
+        dirichlet_eps=0.0,
+        seed=seed,
+    )
+    mcts.run(canonical)
+    pi = mcts.root_policy(canonical, temperature=1e-8)
+    return int(pi.argmax())
+
+
+def evaluate_vs_alphabeta(
+    *,
+    cfg: Connect4Config,
+    model: PolicyValueNet,
+    device: torch.device,
+    games: int,
+    ab_depth: int,
+    ab_nodes: Optional[int],
+    sims: int,
+    c_puct: float,
+    seed: int,
+) -> Dict[str, int]:
+    """
+    Evaluate the current model against a low-budget alpha-beta opponent.
+
+    We alternate who starts each game to reduce first-player bias and
+    report results from the model's perspective (wins/draw/loss).
+    """
+
+    rng = np.random.default_rng(seed)
+    ab_agent = AlphaBetaAgent("AlphaBeta Eval", max_depth=ab_depth, max_nodes=ab_nodes)
+
+    wins = 0
+    draws = 0
+    losses = 0
+
+    model.eval()
+    for g in range(games):
+        az_starts = (g % 2 == 0)
+        s = engine_initial_state(cfg)
+
+        while True:
+            tr = terminal_result(cfg, s)
+            if tr.is_terminal:
+                if tr.winner == 0:
+                    draws += 1
+                else:
+                    az_winner = +1 if az_starts else -1
+                    if tr.winner == az_winner:
+                        wins += 1
+                    else:
+                        losses += 1
+                break
+
+            # Decide who moves based on the current player and who started.
+            az_turn = (s.current_player == +1 and az_starts) or (s.current_player == -1 and not az_starts)
+            if az_turn:
+                col = _az_select_move(
+                    cfg=cfg,
+                    model=model,
+                    device=device,
+                    s=s,
+                    sims=sims,
+                    c_puct=c_puct,
+                    seed=int(rng.integers(1_000_000)),
+                )
+            else:
+                col = ab_agent.select_move(cfg, s)
+
+            s = engine_apply_move(cfg, s, col)
+
+    return {"wins": wins, "draws": draws, "losses": losses}
+
+
 def train(
     *,
     cfg: Connect4Config,
@@ -133,6 +232,12 @@ def train(
     seed: int,
     out_dir: Path,
     checkpoint_every_games: int,
+    eval_games: int,
+    eval_ab_depth: int,
+    eval_ab_nodes: Optional[int],
+    eval_sims: int,
+    eval_cpuct: float,
+    eval_seed: int,
 ) -> None:
     rng = np.random.default_rng(seed)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -175,6 +280,9 @@ def train(
         # Training uses standard train mode.
         model.train()
         # Train on random mini-batches sampled from the replay buffer.
+        total_loss = 0.0
+        total_policy = 0.0
+        total_value = 0.0
         for _ in trange(train_steps, desc=f"train iter {it}", leave=False):
             batch = [replay[int(rng.integers(len(replay)))] for _ in range(batch_size)]
             x, pi, z = _prepare_batch(cfg, batch)
@@ -198,10 +306,39 @@ def train(
             loss.backward()
             optimizer.step()
 
+            total_loss += float(loss.item())
+            total_policy += float(policy_loss.item())
+            total_value += float(value_loss.item())
+
+        steps = max(train_steps, 1)
+        avg_loss = total_loss / steps
+        avg_policy = total_policy / steps
+        avg_value = total_value / steps
+        eff_epochs = (train_steps * batch_size) / max(len(replay), 1)
+
         print(
-            f"iter={it} games={games_per_iter} wins(+1/0/-1)={wins[+1]}/{wins[0]}/{wins[-1]} "
-            f"replay={len(replay)}"
+            f"iter={it} games={games_per_iter} total_games={total_games} "
+            f"wins(+1/0/-1)={wins[+1]}/{wins[0]}/{wins[-1]} replay={len(replay)} "
+            f"loss={avg_loss:.3f} pi={avg_policy:.3f} v={avg_value:.3f} "
+            f"eff_epochs={eff_epochs:.2f}"
         )
+
+        if eval_games > 0:
+            eval_result = evaluate_vs_alphabeta(
+                cfg=cfg,
+                model=model,
+                device=device,
+                games=eval_games,
+                ab_depth=eval_ab_depth,
+                ab_nodes=eval_ab_nodes,
+                sims=eval_sims,
+                c_puct=eval_cpuct,
+                seed=eval_seed + it,
+            )
+            print(
+                f"eval_vs_ab games={eval_games} "
+                f"wins/draw/loss={eval_result['wins']}/{eval_result['draws']}/{eval_result['losses']}"
+            )
 
     save_model(out_dir / "connect4_az_latest.pt", model)
 
@@ -229,6 +366,12 @@ def main() -> None:
         help="save a checkpoint every N games (0 disables)",
     )
     parser.add_argument("--channels", type=int, default=64, help="model trunk channels")
+    parser.add_argument("--eval-games", type=int, default=4, help="eval games vs alpha-beta per iter (0 disables)")
+    parser.add_argument("--eval-ab-depth", type=int, default=2, help="alpha-beta depth for eval opponent")
+    parser.add_argument("--eval-ab-nodes", type=int, default=200, help="alpha-beta node budget for eval opponent")
+    parser.add_argument("--eval-sims", type=int, default=100, help="MCTS sims per move for eval agent")
+    parser.add_argument("--eval-cpuct", type=float, default=1.5, help="PUCT constant for eval agent")
+    parser.add_argument("--eval-seed", type=int, default=123, help="base seed for eval games")
     args = parser.parse_args()
 
     cfg = Connect4Config()
@@ -256,6 +399,12 @@ def main() -> None:
         seed=args.seed,
         out_dir=args.out_dir,
         checkpoint_every_games=args.checkpoint_every_games,
+        eval_games=args.eval_games,
+        eval_ab_depth=args.eval_ab_depth,
+        eval_ab_nodes=args.eval_ab_nodes,
+        eval_sims=args.eval_sims,
+        eval_cpuct=args.eval_cpuct,
+        eval_seed=args.eval_seed,
     )
 
 
