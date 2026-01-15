@@ -135,6 +135,8 @@ Useful knobs:
 - `--eval-games`: evaluation games per iter vs low-budget alpha-beta
 - `--eval-ab-depth`, `--eval-ab-nodes`: alpha-beta strength for evaluation
 - `--eval-sims`: MCTS sims per move for the eval agent
+- `--eval-rand-games`: evaluation games per iter vs random
+- `--eval-debug`: print root policy and entropy during eval
 
 Play against a trained model:
 

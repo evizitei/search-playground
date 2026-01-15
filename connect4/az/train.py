@@ -15,8 +15,9 @@ from tqdm import trange
 from connect4.az.game import apply_move, initial_state, legal_moves, terminal_value
 from connect4.az.bridge import to_canonical_state
 from connect4.az.mcts import PUCTMCTS
-from connect4.az.model import ModelConfig, PolicyValueNet, pick_device, save_model
+from connect4.az.model import ModelConfig, PolicyValueNet, load_model, pick_device, save_model
 from connect4.agents.alphabeta import AlphaBetaAgent
+from connect4.agents.random_agent import RandomAgent
 from connect4.engine import (
     Connect4Config,
     GameState,
@@ -58,6 +59,12 @@ def _temperature_for_ply(ply: int, *, temp_moves: int) -> float:
     return 1.0 if ply < temp_moves else 1e-8
 
 
+def _policy_entropy(pi: np.ndarray) -> float:
+    # Shannon entropy of the policy distribution (higher = more diffuse).
+    p = np.clip(pi.astype(np.float32), 1e-12, 1.0)
+    return float(-np.sum(p * np.log(p)))
+
+
 def play_self_game(
     *,
     cfg: Connect4Config,
@@ -69,10 +76,12 @@ def play_self_game(
     dirichlet_eps: float,
     temp_moves: int,
     seed: int,
-) -> Tuple[List[Example], int]:
+) -> Tuple[List[Example], int, float, float]:
     rng = np.random.default_rng(seed)
     s = initial_state(cfg)
     examples: List[Example] = []
+    entropies: List[float] = []
+    temp_entropies: List[float] = []
 
     while True:
         tv = terminal_value(cfg, s)
@@ -82,7 +91,9 @@ def play_self_game(
             for ex in examples:
                 z = float(winner * _player_to_move_sign_from_start(ex.ply))
                 ex.z = z
-            return examples, winner
+            avg_entropy = float(np.mean(entropies)) if entropies else 0.0
+            avg_temp_entropy = float(np.mean(temp_entropies)) if temp_entropies else 0.0
+            return examples, winner, avg_entropy, avg_temp_entropy
 
         mcts = PUCTMCTS(
             cfg=cfg,
@@ -105,6 +116,10 @@ def play_self_game(
 
         # Store the canonical board and MCTS-derived policy target.
         examples.append(Example(board=s.board.copy(), pi=pi, ply=s.ply))
+        ent = _policy_entropy(pi)
+        entropies.append(ent)
+        if s.ply < temp_moves:
+            temp_entropies.append(ent)
 
         # Sample a move from pi during self-play to encourage exploration.
         col = int(rng.choice(cfg.width, p=pi))
@@ -131,6 +146,7 @@ def _az_select_move(
     sims: int,
     c_puct: float,
     seed: int,
+    debug: bool,
 ) -> int:
     # Convert engine state to canonical form for MCTS.
     canonical = to_canonical_state(s)
@@ -146,6 +162,8 @@ def _az_select_move(
     )
     mcts.run(canonical)
     pi = mcts.root_policy(canonical, temperature=1e-8)
+    if debug:
+        print(f"eval_debug pi={np.round(pi, 3)} ent={_policy_entropy(pi):.3f}")
     return int(pi.argmax())
 
 
@@ -160,6 +178,7 @@ def evaluate_vs_alphabeta(
     sims: int,
     c_puct: float,
     seed: int,
+    debug: bool,
 ) -> Dict[str, int]:
     """
     Evaluate the current model against a low-budget alpha-beta opponent.
@@ -204,9 +223,73 @@ def evaluate_vs_alphabeta(
                     sims=sims,
                     c_puct=c_puct,
                     seed=int(rng.integers(1_000_000)),
+                    debug=debug and (s.ply == 0),
                 )
             else:
                 col = ab_agent.select_move(cfg, s)
+
+            s = engine_apply_move(cfg, s, col)
+
+    return {"wins": wins, "draws": draws, "losses": losses}
+
+
+def evaluate_vs_random(
+    *,
+    cfg: Connect4Config,
+    model: PolicyValueNet,
+    device: torch.device,
+    games: int,
+    sims: int,
+    c_puct: float,
+    seed: int,
+    debug: bool,
+) -> Dict[str, int]:
+    """
+    Evaluate the current model against a random opponent.
+
+    We alternate who starts each game to reduce first-player bias and
+    report results from the model's perspective (wins/draw/loss).
+    """
+
+    rng = np.random.default_rng(seed)
+    rand_agent = RandomAgent("Random Eval", seed=seed)
+
+    wins = 0
+    draws = 0
+    losses = 0
+
+    model.eval()
+    for g in range(games):
+        az_starts = (g % 2 == 0)
+        s = engine_initial_state(cfg)
+
+        while True:
+            tr = terminal_result(cfg, s)
+            if tr.is_terminal:
+                if tr.winner == 0:
+                    draws += 1
+                else:
+                    az_winner = +1 if az_starts else -1
+                    if tr.winner == az_winner:
+                        wins += 1
+                    else:
+                        losses += 1
+                break
+
+            az_turn = (s.current_player == +1 and az_starts) or (s.current_player == -1 and not az_starts)
+            if az_turn:
+                col = _az_select_move(
+                    cfg=cfg,
+                    model=model,
+                    device=device,
+                    s=s,
+                    sims=sims,
+                    c_puct=c_puct,
+                    seed=int(rng.integers(1_000_000)),
+                    debug=debug and (s.ply == 0),
+                )
+            else:
+                col = rand_agent.select_move(cfg, s)
 
             s = engine_apply_move(cfg, s, col)
 
@@ -238,6 +321,8 @@ def train(
     eval_sims: int,
     eval_cpuct: float,
     eval_seed: int,
+    eval_rand_games: int,
+    eval_debug: bool,
 ) -> None:
     rng = np.random.default_rng(seed)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -250,8 +335,10 @@ def train(
 
         # Self-play uses the network in inference mode.
         model.eval()
+        entropy_sum = 0.0
+        temp_entropy_sum = 0.0
         for g in trange(games_per_iter, desc=f"self-play iter {it}", leave=False):
-            examples, winner = play_self_game(
+            examples, winner, avg_entropy, avg_temp_entropy = play_self_game(
                 cfg=cfg,
                 model=model,
                 device=device,
@@ -264,6 +351,8 @@ def train(
             )
             new_examples.extend(examples)
             wins[winner] += 1
+            entropy_sum += avg_entropy
+            temp_entropy_sum += avg_temp_entropy
 
             total_games += 1
             if checkpoint_every_games > 0 and total_games % checkpoint_every_games == 0:
@@ -316,11 +405,13 @@ def train(
         avg_value = total_value / steps
         eff_epochs = (train_steps * batch_size) / max(len(replay), 1)
 
+        avg_entropy = entropy_sum / max(games_per_iter, 1)
+        avg_temp_entropy = temp_entropy_sum / max(games_per_iter, 1)
         print(
             f"iter={it} games={games_per_iter} total_games={total_games} "
             f"wins(+1/0/-1)={wins[+1]}/{wins[0]}/{wins[-1]} replay={len(replay)} "
             f"loss={avg_loss:.3f} pi={avg_policy:.3f} v={avg_value:.3f} "
-            f"eff_epochs={eff_epochs:.2f}"
+            f"eff_epochs={eff_epochs:.2f} ent={avg_entropy:.2f} entT={avg_temp_entropy:.2f}"
         )
 
         if eval_games > 0:
@@ -334,10 +425,27 @@ def train(
                 sims=eval_sims,
                 c_puct=eval_cpuct,
                 seed=eval_seed + it,
+                debug=eval_debug,
             )
             print(
                 f"eval_vs_ab games={eval_games} "
                 f"wins/draw/loss={eval_result['wins']}/{eval_result['draws']}/{eval_result['losses']}"
+            )
+
+        if eval_rand_games > 0:
+            eval_rand = evaluate_vs_random(
+                cfg=cfg,
+                model=model,
+                device=device,
+                games=eval_rand_games,
+                sims=eval_sims,
+                c_puct=eval_cpuct,
+                seed=eval_seed + 1000 + it,
+                debug=eval_debug,
+            )
+            print(
+                f"eval_vs_random games={eval_rand_games} "
+                f"wins/draw/loss={eval_rand['wins']}/{eval_rand['draws']}/{eval_rand['losses']}"
             )
 
     save_model(out_dir / "connect4_az_latest.pt", model)
@@ -366,20 +474,28 @@ def main() -> None:
         help="save a checkpoint every N games (0 disables)",
     )
     parser.add_argument("--channels", type=int, default=64, help="model trunk channels")
+    parser.add_argument("--load-model", type=Path, default=None, help="initialize from a saved model")
     parser.add_argument("--eval-games", type=int, default=4, help="eval games vs alpha-beta per iter (0 disables)")
     parser.add_argument("--eval-ab-depth", type=int, default=2, help="alpha-beta depth for eval opponent")
     parser.add_argument("--eval-ab-nodes", type=int, default=200, help="alpha-beta node budget for eval opponent")
     parser.add_argument("--eval-sims", type=int, default=100, help="MCTS sims per move for eval agent")
     parser.add_argument("--eval-cpuct", type=float, default=1.5, help="PUCT constant for eval agent")
     parser.add_argument("--eval-seed", type=int, default=123, help="base seed for eval games")
+    parser.add_argument("--eval-rand-games", type=int, default=8, help="eval games vs random per iter (0 disables)")
+    parser.add_argument("--eval-debug", action="store_true", help="print eval root policy and entropy")
     args = parser.parse_args()
 
     cfg = Connect4Config()
     cfg.validate()
     device = pick_device(args.device)
 
-    model_cfg = ModelConfig(channels=args.channels)
-    model = PolicyValueNet(cfg=cfg, model_cfg=model_cfg).to(device)
+    if args.load_model is not None:
+        model = load_model(args.load_model, device=device)
+        if model.cfg != cfg:
+            raise ValueError(f"loaded model cfg {model.cfg} does not match {cfg}")
+    else:
+        model_cfg = ModelConfig(channels=args.channels)
+        model = PolicyValueNet(cfg=cfg, model_cfg=model_cfg).to(device)
 
     train(
         cfg=cfg,
@@ -405,6 +521,8 @@ def main() -> None:
         eval_sims=args.eval_sims,
         eval_cpuct=args.eval_cpuct,
         eval_seed=args.eval_seed,
+        eval_rand_games=args.eval_rand_games,
+        eval_debug=args.eval_debug,
     )
 
 
