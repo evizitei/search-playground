@@ -103,6 +103,16 @@ class PUCTMCTS:
             return w
         return w / s
 
+    def root_prior(self, root: CanonicalState) -> np.ndarray:
+        key = root.board.tobytes()
+        stats = self.tree.get(key)
+        if stats is None:
+            return np.zeros((self.cfg.width,), dtype=np.float32)
+        return stats.P.copy()
+
+    def root_stats(self, root: CanonicalState) -> Optional[NodeStats]:
+        return self.tree.get(root.board.tobytes())
+
     def _simulate(self, root: CanonicalState) -> None:
         path: List[Tuple[NodeStats, int]] = []
         s = root
@@ -181,19 +191,20 @@ class PUCTMCTS:
         if n_sum == 0.0:
             n_sum = 1.0
 
-        best_score = -1e9
-        best_a = int(legal_idx[0])
+        scores = np.full((self.cfg.width,), -1e9, dtype=np.float32)
 
         for a in legal_idx:
             n = float(stats.N[a])
             q = float(stats.W[a] / n) if n > 0 else 0.0
             u = self.c_puct * float(stats.P[a]) * (np.sqrt(n_sum) / (1.0 + n))
-            score = q + u
-            if score > best_score:
-                best_score = score
-                best_a = int(a)
+            scores[a] = q + u
 
-        return best_a
+        best_score = float(np.max(scores[legal_idx]))
+        # Break ties randomly to avoid deterministic collapse when scores are equal.
+        tied = legal_idx[np.isclose(scores[legal_idx], best_score, atol=1e-6)]
+        if len(tied) == 1:
+            return int(tied[0])
+        return int(self.rng.choice(tied))
 
     def _backup(self, path: Iterable[Tuple[NodeStats, int]], value: float) -> None:
         v = float(value)

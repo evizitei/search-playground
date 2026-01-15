@@ -125,6 +125,46 @@ class AlphaBetaAgent(Agent):
         return self.max_nodes is not None and self._nodes >= self.max_nodes
 
 
+def evaluate_moves(
+    cfg: Connect4Config,
+    s: GameState,
+    *,
+    max_depth: int = 4,
+    max_nodes: Optional[int] = None,
+) -> Dict[int, float]:
+    """
+    Return alpha-beta scores for each legal move from the given state.
+
+    This is intended for debugging/analysis so callers can compare the
+    search scores to another policy (e.g., a neural network prior).
+    """
+
+    legal = legal_moves(cfg, s).tolist()
+    if not legal:
+        return {}
+
+    agent = AlphaBetaAgent("ab_debug", max_depth=max_depth, max_nodes=max_nodes)
+    root_player = s.current_player
+    scores: Dict[int, float] = {}
+
+    for col in _ordered_moves(cfg, legal):
+        child = apply_move(cfg, s, col)
+        score = agent._search(
+            cfg,
+            child,
+            depth=1,
+            alpha=-math.inf,
+            beta=math.inf,
+            root_player=root_player,
+        )
+        scores[col] = score
+
+        if agent._budget_exhausted():
+            break
+
+    return scores
+
+
 def _ordered_moves(cfg: Connect4Config, legal: List[int]) -> Iterable[int]:
     center = (cfg.width - 1) / 2.0
     return sorted(legal, key=lambda c: abs(c - center))

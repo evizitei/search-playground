@@ -137,6 +137,8 @@ Useful knobs:
 - `--eval-sims`: MCTS sims per move for the eval agent
 - `--eval-rand-games`: evaluation games per iter vs random
 - `--eval-debug`: print root policy and entropy during eval
+- `--eval-greedy`: print a greedy self-play final board each iter
+- `--eval-temperature`: temperature for eval move selection
 
 Play against a trained model:
 
@@ -144,6 +146,39 @@ Play against a trained model:
 uv run python connect4_cli.py --x human --o alphazero --az-model connect4_az_models/connect4_az_latest.pt
 ```
 
+## Connect‑4 AlphaZero interactive visualization
+
+Step through an AlphaZero game and inspect priors, MCTS policy, and value at each move:
+
+```bash
+uv run python connect4_az_interactive.py --model-x connect4_az_models/connect4_az_latest.pt
+```
+
+Pit AlphaZero against other agents:
+
+```bash
+uv run python connect4_az_interactive.py \
+  --model-x connect4_az_models/connect4_az_latest.pt \
+  --x-agent az \
+  --o-agent random
+```
+
+```bash
+uv run python connect4_az_interactive.py \
+  --model-x connect4_az_models/connect4_az_latest.pt \
+  --x-agent az \
+  --o-agent ab \
+  --ab-depth 3 \
+  --ab-nodes 200
+```
+
+Controls:
+- `Enter`: advance one move
+- `a`: auto‑play to the end
+- `q`: quit early
+Debugging:
+- `--ab-debug`: print alpha‑beta scores for each move on AlphaZero turns (uses `--ab-depth/--ab-nodes`)
+- `--az-debug`: print MCTS Q values and 1‑ply value head estimates per move
 Quick diagnostics to sanity-check training:
 - Run a tiny loop (`--iters 1 --games-per-iter 1 --sims 10`) and verify the run completes.
 - Check that policies sum to 1 for legal moves by printing `pi.sum()` in `connect4/az/train.py`.

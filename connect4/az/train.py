@@ -25,6 +25,7 @@ from connect4.engine import (
     initial_state as engine_initial_state,
     terminal_result,
 )
+from connect4.cli import render_board
 
 
 @dataclass
@@ -65,6 +66,17 @@ def _policy_entropy(pi: np.ndarray) -> float:
     return float(-np.sum(p * np.log(p)))
 
 
+def _select_move_from_pi(pi: np.ndarray, *, temperature: float, rng: np.random.Generator) -> int:
+    if temperature <= 1e-8:
+        return int(pi.argmax())
+    probs = np.power(pi, 1.0 / max(temperature, 1e-8))
+    s = float(probs.sum())
+    if s <= 0.0:
+        return int(pi.argmax())
+    probs = probs / s
+    return int(rng.choice(len(probs), p=probs))
+
+
 def play_self_game(
     *,
     cfg: Connect4Config,
@@ -103,7 +115,7 @@ def play_self_game(
             c_puct=c_puct,
             dirichlet_alpha=dirichlet_alpha,
             dirichlet_eps=dirichlet_eps,
-            seed=seed,
+            seed=int(rng.integers(1_000_000)),
         )
         mcts.run(s)
 
@@ -146,6 +158,7 @@ def _az_select_move(
     sims: int,
     c_puct: float,
     seed: int,
+    temperature: float,
     debug: bool,
 ) -> int:
     # Convert engine state to canonical form for MCTS.
@@ -163,8 +176,21 @@ def _az_select_move(
     mcts.run(canonical)
     pi = mcts.root_policy(canonical, temperature=1e-8)
     if debug:
-        print(f"eval_debug pi={np.round(pi, 3)} ent={_policy_entropy(pi):.3f}")
-    return int(pi.argmax())
+        prior = mcts.root_prior(canonical)
+        stats = mcts.root_stats(canonical)
+        if stats is not None and int(stats.N.sum()) > 0:
+            n = stats.N.astype(np.float32)
+            pi_counts = n / float(n.sum())
+        else:
+            pi_counts = np.zeros_like(prior)
+        print(
+            f"eval_debug prior={np.round(prior, 3)} entP={_policy_entropy(prior):.3f} "
+            f"N={stats.N.tolist() if stats is not None else []} "
+            f"piN={np.round(pi_counts, 3)} entN={_policy_entropy(pi_counts):.3f} "
+            f"pi={np.round(pi, 3)} ent={_policy_entropy(pi):.3f}"
+        )
+    rng = np.random.default_rng(seed)
+    return _select_move_from_pi(pi, temperature=temperature, rng=rng)
 
 
 def evaluate_vs_alphabeta(
@@ -178,6 +204,7 @@ def evaluate_vs_alphabeta(
     sims: int,
     c_puct: float,
     seed: int,
+    temperature: float,
     debug: bool,
 ) -> Dict[str, int]:
     """
@@ -223,6 +250,7 @@ def evaluate_vs_alphabeta(
                     sims=sims,
                     c_puct=c_puct,
                     seed=int(rng.integers(1_000_000)),
+                    temperature=temperature,
                     debug=debug and (s.ply == 0),
                 )
             else:
@@ -242,6 +270,7 @@ def evaluate_vs_random(
     sims: int,
     c_puct: float,
     seed: int,
+    temperature: float,
     debug: bool,
 ) -> Dict[str, int]:
     """
@@ -286,6 +315,7 @@ def evaluate_vs_random(
                     sims=sims,
                     c_puct=c_puct,
                     seed=int(rng.integers(1_000_000)),
+                    temperature=temperature,
                     debug=debug and (s.ply == 0),
                 )
             else:
@@ -294,6 +324,45 @@ def evaluate_vs_random(
             s = engine_apply_move(cfg, s, col)
 
     return {"wins": wins, "draws": draws, "losses": losses}
+
+
+def greedy_selfplay_game(
+    *,
+    cfg: Connect4Config,
+    model: PolicyValueNet,
+    device: torch.device,
+    sims: int,
+    c_puct: float,
+    seed: int,
+    temperature: float,
+) -> Tuple[GameState, int]:
+    """
+    Play a single greedy self-play game (both sides use MCTS argmax).
+
+    Returns the final state and the winner (+1/-1/0).
+    """
+
+    rng = np.random.default_rng(seed)
+    s = engine_initial_state(cfg)
+    model.eval()
+
+    while True:
+        tr = terminal_result(cfg, s)
+        if tr.is_terminal:
+            return s, tr.winner
+
+        col = _az_select_move(
+            cfg=cfg,
+            model=model,
+            device=device,
+            s=s,
+            sims=sims,
+            c_puct=c_puct,
+            seed=int(rng.integers(1_000_000)),
+            temperature=temperature,
+            debug=False,
+        )
+        s = engine_apply_move(cfg, s, col)
 
 
 def train(
@@ -323,6 +392,8 @@ def train(
     eval_seed: int,
     eval_rand_games: int,
     eval_debug: bool,
+    eval_greedy: bool,
+    eval_temperature: float,
 ) -> None:
     rng = np.random.default_rng(seed)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -425,6 +496,7 @@ def train(
                 sims=eval_sims,
                 c_puct=eval_cpuct,
                 seed=eval_seed + it,
+                temperature=eval_temperature,
                 debug=eval_debug,
             )
             print(
@@ -441,12 +513,27 @@ def train(
                 sims=eval_sims,
                 c_puct=eval_cpuct,
                 seed=eval_seed + 1000 + it,
+                temperature=eval_temperature,
                 debug=eval_debug,
             )
             print(
                 f"eval_vs_random games={eval_rand_games} "
                 f"wins/draw/loss={eval_rand['wins']}/{eval_rand['draws']}/{eval_rand['losses']}"
             )
+
+        if eval_greedy:
+            final_state, winner = greedy_selfplay_game(
+                cfg=cfg,
+                model=model,
+                device=device,
+                sims=eval_sims,
+                c_puct=eval_cpuct,
+                seed=eval_seed + 2000 + it,
+                temperature=eval_temperature,
+            )
+            outcome = "draw" if winner == 0 else ("X" if winner == 1 else "O")
+            print("eval_greedy_selfplay result:", outcome)
+            print(render_board(cfg, final_state))
 
     save_model(out_dir / "connect4_az_latest.pt", model)
 
@@ -483,6 +570,8 @@ def main() -> None:
     parser.add_argument("--eval-seed", type=int, default=123, help="base seed for eval games")
     parser.add_argument("--eval-rand-games", type=int, default=8, help="eval games vs random per iter (0 disables)")
     parser.add_argument("--eval-debug", action="store_true", help="print eval root policy and entropy")
+    parser.add_argument("--eval-greedy", action="store_true", help="print a greedy self-play final board each iter")
+    parser.add_argument("--eval-temperature", type=float, default=1e-8, help="temperature for eval move selection")
     args = parser.parse_args()
 
     cfg = Connect4Config()
@@ -496,6 +585,9 @@ def main() -> None:
     else:
         model_cfg = ModelConfig(channels=args.channels)
         model = PolicyValueNet(cfg=cfg, model_cfg=model_cfg).to(device)
+
+    if args.checkpoint_every_games > 0:
+        save_model(args.out_dir / "connect4_az_games_0.pt", model)
 
     train(
         cfg=cfg,
@@ -523,6 +615,8 @@ def main() -> None:
         eval_seed=args.eval_seed,
         eval_rand_games=args.eval_rand_games,
         eval_debug=args.eval_debug,
+        eval_greedy=args.eval_greedy,
+        eval_temperature=args.eval_temperature,
     )
 
 
